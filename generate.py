@@ -24,7 +24,7 @@ import time
 import anthropic
 import pandas as pd
 
-DEFAULT_MODEL = "claude-sonnet-4-5-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
 SYSTEM_PROMPT = """You are Anna and Isa, co-founders of Circe. Write warm, concise, personalized content based ONLY on the data provided. No invented facts. No generic phrasing.
 

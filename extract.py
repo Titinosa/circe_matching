@@ -20,7 +20,7 @@ import time
 import anthropic
 import pandas as pd
 
-DEFAULT_MODEL = "claude-sonnet-4-5-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
 EXTRACTION_SCHEMA = """{
   "name": "Full Name",
