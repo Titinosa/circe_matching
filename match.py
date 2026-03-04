@@ -22,9 +22,11 @@ POINTS_INVESTOR_FOUNDER_THESIS = 4
 POINTS_SECTOR_OVERLAP = 3
 POINTS_STAGE_ALIGNMENT = 3
 POINTS_FUNDRAISING_INVESTOR = 3
-POINTS_HIRING_OPERATOR = 2
-POINTS_TECH_NEED_ENGINEERING = 2
-POINTS_SHARED_TOP_OF_MIND = 2
+POINTS_GOAL_COMPLEMENTARITY = 3     # event goal alignment (e.g., hiring ↔ job-seeking)
+POINTS_DESIRED_CONNECTION_MATCH = 3  # what A wants matches who B is
+POINTS_SUPERPOWER_COMPLEMENTARITY = 2  # complementary superpowers
+POINTS_SHARED_BULLISH_TREND = 2      # similar tech/industry outlook
+POINTS_COMMUNITY_ALIGNMENT = 1      # similar community hopes
 
 # Trust accelerators (tie-breakers)
 POINTS_SHARED_SCHOOL = 0.5
@@ -37,8 +39,24 @@ MATCHES_PER_PERSON = 4
 SOFT_CAP = 3  # prefer ≤3 recommendations
 HARD_CAP = 4  # absolute max recommendations
 
-# Top-of-mind values to exclude from matching
-EXCLUDED_TOP_OF_MIND = {"Just want to meet cool women", "Community/relationships"}
+# Superpower complementarity pairs (order-independent)
+SUPERPOWER_COMPLEMENTS = {
+    frozenset({"The Zero-to-One", "The Scaler"}),
+    frozenset({"The Architect", "The Storyteller"}),
+    frozenset({"The Zero-to-One", "The Operator"}),
+    frozenset({"The Scaler", "The Architect"}),
+    frozenset({"The Storyteller", "The Connector"}),
+}
+
+# Event goal complementarity pairs (directional: first seeks second)
+GOAL_COMPLEMENTS = {
+    ("Fundraising", "Pipeline"),
+    ("Pipeline", "Fundraising"),
+    ("Hiring", "Hiring"),         # Both hiring-oriented can swap talent leads
+    ("Mentorship", "Paying it Forward"),
+    ("Paying it Forward", "Mentorship"),
+    ("Prospecting", "Peer Connection"),
+}
 
 
 def normalize_role(role_type):
@@ -101,14 +119,40 @@ def get_stage(profile):
     return normalize_stage(profile.get("stage"))
 
 
-def get_top_of_mind(profile):
-    """Get meaningful top-of-mind set (excluding generic ones)."""
-    items = profile.get("top_of_mind") or []
-    return {
-        str(item).strip()
-        for item in items
-        if item and str(item).strip() not in EXCLUDED_TOP_OF_MIND
-    }
+def get_event_goal(profile):
+    """Get normalized event goal."""
+    goal = profile.get("event_goal")
+    if not goal:
+        return None
+    return str(goal).strip()
+
+
+def get_superpower(profile):
+    """Get normalized superpower."""
+    sp = profile.get("superpower")
+    if not sp:
+        return None
+    return str(sp).strip()
+
+
+def get_desired_connections(profile):
+    """Get normalized desired connections type."""
+    dc = profile.get("desired_connections")
+    if not dc:
+        return None
+    return str(dc).strip()
+
+
+def get_bullish_trend_tags(profile):
+    """Get set of bullish trend tags (lowered)."""
+    tags = profile.get("bullish_trend_tags") or []
+    return {str(t).strip().lower() for t in tags if t}
+
+
+def get_community_hopes_tags(profile):
+    """Get set of community hopes tags (lowered)."""
+    tags = profile.get("community_hopes_tags") or []
+    return {str(t).strip().lower() for t in tags if t}
 
 
 def get_functional_strengths(profile):
@@ -235,10 +279,14 @@ def compute_pairwise_score(p1, p2):
     sectors2 = get_sectors_set(p2)
     stage1 = get_stage(p1)
     stage2 = get_stage(p2)
-    tom1 = get_top_of_mind(p1)
-    tom2 = get_top_of_mind(p2)
     strengths1 = get_functional_strengths(p1)
     strengths2 = get_functional_strengths(p2)
+    goal1 = get_event_goal(p1)
+    goal2 = get_event_goal(p2)
+    sp1 = get_superpower(p1)
+    sp2 = get_superpower(p2)
+    dc1 = get_desired_connections(p1)
+    dc2 = get_desired_connections(p2)
 
     # --- Core Alignment ---
 
@@ -293,28 +341,75 @@ def compute_pairwise_score(p1, p2):
                     score += POINTS_FUNDRAISING_INVESTOR
                     reasons.append("Fundraising founder \u2194 investor")
 
-    # Hiring founder ↔ scaling operator
-    for pa, pb in [(p1, p2), (p2, p1)]:
-        ra = normalize_role(pa.get("role_type"))
-        rb = normalize_role(pb.get("role_type"))
-        if ra == "Founder" and pa.get("is_hiring") is True and rb == "Operator":
-            if "operations" in get_functional_strengths(pb) or "growth" in get_functional_strengths(pb):
-                score += POINTS_HIRING_OPERATOR
-                reasons.append(f"Hiring founder \u2194 scaling operator")
-                break
+    # --- New Field Scoring ---
 
-    # Technical need ↔ engineering background
-    for pa, pb in [(p1, p2), (p2, p1)]:
-        if pa.get("has_technical_needs") is True and "engineering" in get_functional_strengths(pb):
-            score += POINTS_TECH_NEED_ENGINEERING
-            reasons.append("Technical need \u2194 engineering background")
-            break
+    # Event goal complementarity
+    if goal1 and goal2 and (goal1, goal2) in GOAL_COMPLEMENTS:
+        score += POINTS_GOAL_COMPLEMENTARITY
+        reasons.append(f"Goal complementarity: {goal1} \u2194 {goal2}")
 
-    # Shared meaningful top-of-mind
-    shared_tom = tom1 & tom2
-    if shared_tom:
-        score += POINTS_SHARED_TOP_OF_MIND
-        reasons.append(f"Shared top-of-mind: {', '.join(shared_tom)}")
+    # Desired connection match (bidirectional)
+    dc_scored = False
+    for seeker, target, seeker_dc in [(p1, p2, dc1), (p2, p1, dc2)]:
+        if not seeker_dc or dc_scored:
+            continue
+        target_role = normalize_role(target.get("role_type"))
+        target_goal = get_event_goal(target)
+        target_sp = get_superpower(target)
+        seeker_role = normalize_role(seeker.get("role_type"))
+        seeker_sectors = get_sectors_set(seeker)
+        target_sectors = get_sectors_set(target)
+
+        matched = False
+        reason_detail = ""
+        if seeker_dc == "Investors" and target_role == "Investor":
+            matched = True
+            reason_detail = "seeks Investors \u2194 is Investor"
+        elif seeker_dc == "Engineers/Operators" and target_role == "Operator":
+            matched = True
+            reason_detail = "seeks Engineers/Operators \u2194 is Operator"
+        elif seeker_dc == "Engineers/Operators" and "engineering" in get_functional_strengths(target):
+            matched = True
+            reason_detail = "seeks Engineers \u2194 has engineering strength"
+        elif seeker_dc == "Co-founder" and get_desired_connections(target) == "Co-founder":
+            matched = True
+            reason_detail = "both seeking Co-founder"
+        elif seeker_dc == "The Mirror" and seeker_role == target_role and seeker_sectors & target_sectors:
+            matched = True
+            reason_detail = "seeks Mirror \u2194 same role & sector"
+        elif seeker_dc == "The Mentor" and target_goal == "Paying it Forward":
+            matched = True
+            reason_detail = "seeks Mentor \u2194 wants to Mentor"
+        elif seeker_dc == "The Collaborator" and sp1 and sp2 and frozenset({sp1, sp2}) in SUPERPOWER_COMPLEMENTS:
+            matched = True
+            reason_detail = "seeks Collaborator \u2194 complementary superpowers"
+
+        if matched:
+            score += POINTS_DESIRED_CONNECTION_MATCH
+            reasons.append(f"Desired connection match: {reason_detail}")
+            dc_scored = True
+
+    # Superpower complementarity
+    if sp1 and sp2 and sp1 != sp2:
+        if frozenset({sp1, sp2}) in SUPERPOWER_COMPLEMENTS:
+            score += POINTS_SUPERPOWER_COMPLEMENTARITY
+            reasons.append(f"Superpower complementarity: {sp1} \u2194 {sp2}")
+
+    # Shared bullish trend tags
+    trend_tags1 = get_bullish_trend_tags(p1)
+    trend_tags2 = get_bullish_trend_tags(p2)
+    shared_trends = trend_tags1 & trend_tags2
+    if shared_trends:
+        score += POINTS_SHARED_BULLISH_TREND
+        reasons.append(f"Shared bullish trend: {', '.join(shared_trends)}")
+
+    # Community hopes alignment
+    community_tags1 = get_community_hopes_tags(p1)
+    community_tags2 = get_community_hopes_tags(p2)
+    shared_community = community_tags1 & community_tags2
+    if shared_community:
+        score += POINTS_COMMUNITY_ALIGNMENT
+        reasons.append(f"Community alignment: {', '.join(shared_community)}")
 
     # --- Trust Accelerators ---
 
@@ -322,8 +417,6 @@ def compute_pairwise_score(p1, p2):
     if shared_completed_school(p1, p2):
         score += POINTS_SHARED_SCHOOL
         reasons.append("Shared completed school")
-
-    # Shared current school = 0 points (no points, but track)
 
     # Shared notable company
     companies1 = get_notable_companies(p1)
@@ -360,15 +453,21 @@ def classify_match_type(p1, p2, score, reasons):
     has_investor_founder = any("Investor thesis" in r for r in reasons)
     has_fundraising = any("Fundraising" in r for r in reasons)
     has_sector_stage = any("Sector overlap" in r or "Stage alignment" in r for r in reasons)
+    has_goal_complement = any("Goal complementarity" in r for r in reasons)
+    has_desired_connection = any("Desired connection match" in r for r in reasons)
     has_school = any("Shared completed school" in r for r in reasons)
     has_company = any("Shared company" in r for r in reasons)
     has_interest = any("Shared interest" in r for r in reasons)
     has_pivot = any("Shared pivot" in r for r in reasons)
+    has_bullish_trend = any("Shared bullish trend" in r for r in reasons)
+    has_community = any("Community alignment" in r for r in reasons)
 
     same_role = (role1 == role2)
 
-    # Strategic: investor↔founder thesis, or strong sector+stage alignment across roles
+    # Strategic: investor↔founder thesis, goal complementarity, or strong alignment across roles
     if has_investor_founder or has_fundraising:
+        return "strategic"
+    if has_goal_complement or has_desired_connection:
         return "strategic"
     if not same_role and has_sector_stage and score >= 5:
         return "strategic"
@@ -377,8 +476,8 @@ def classify_match_type(p1, p2, score, reasons):
     if same_role:
         return "peer_resonance"
 
-    # Energy/identity: shared school, company, interests
-    if has_school or has_company or has_interest or has_pivot:
+    # Energy/identity: shared school, company, interests, trends, community
+    if has_school or has_company or has_interest or has_pivot or has_bullish_trend or has_community:
         return "energy_identity"
 
     # Cross-role: different roles

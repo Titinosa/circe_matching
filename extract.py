@@ -2,13 +2,13 @@
 """
 extract.py — LLM per-attendee extraction
 
-Reads Final_Guest_List.xlsx, calls Claude API once per attendee to extract
+Reads New Event Guestlist.xls, calls Claude API once per attendee to extract
 a structured JSON profile from their LinkedIn text + survey fields.
 Writes profiles.json.
 
 Usage:
-    python extract.py --input Final_Guest_List.xlsx --output profiles.json
-    python extract.py --input Final_Guest_List.xlsx --output profiles.json --start 5 --limit 10
+    python extract.py --input "New Event Guestlist.xls" --output profiles.json
+    python extract.py --input "New Event Guestlist.xls" --output profiles.json --start 5 --limit 10
 """
 
 import argparse
@@ -27,6 +27,7 @@ EXTRACTION_SCHEMA = """{
   "first_name": "First",
   "last_name": "Last",
   "role_type": "Founder | Operator | Investor | Exploring",
+  "role_detail": "Investor (Early Stage) | Partnerships | Engineering | null",
   "sectors": ["AI/ML", "SaaS"],
   "functional_strengths": ["Product", "Engineering"],
   "schools": [
@@ -42,12 +43,14 @@ EXTRACTION_SCHEMA = """{
   "notable_companies": ["Adobe", "Google"],
   "current_company": "Company or null",
   "current_title": "Title or null",
-  "stage": "Preseed | Seed | Series A | ... | null",
-  "team_size": "0-1 | 2-5 | ... | null",
-  "top_of_mind": ["Building / product", "Fundraising"],
-  "is_hiring": true,
-  "hiring_timeline": "now | 3-6 months | no | null",
-  "has_technical_needs": true,
+  "stage": "Ideating | Pre-Seed | Seed | Series A | Series B+ | Later-stage | Just Curious | null",
+  "event_goal": "Peer Connection | Fundraising | Hiring | Mentorship | Prospecting | Pipeline | Paying it Forward | Just Curious | null",
+  "superpower": "The Zero-to-One | The Scaler | The Connector | The Operator | The Storyteller | The Architect | Other | null",
+  "desired_connections": "The Mirror | The Collaborator | The Mentor | The Window | Investors | Engineers/Operators | Co-founder | null",
+  "bullish_trend": "short summary of the trend or null",
+  "bullish_trend_tags": ["AI", "community", "fintech"],
+  "community_hopes": "short summary of what they hope to get or null",
+  "community_hopes_tags": ["mentorship", "networking", "collaboration"],
   "is_fundraising": true,
   "investor_profile": {
     "sector_focus": ["Fintech", "AI/ML"],
@@ -61,7 +64,14 @@ EXTRACTION_SCHEMA = """{
   "key_facts_for_fun_facts": [
     "Won TechCrunch Disrupt 2023",
     "Former Olympic athlete",
-    "Published in Nature"
+    "Published in Nature",
+    "Built a product used by 50k users",
+    "Started career in investment banking at Goldman Sachs",
+    "Co-founded a nonprofit for women in STEM",
+    "Holds a patent in distributed systems",
+    "Speaker at Web Summit 2024",
+    "Ran a marathon on every continent",
+    "Former YC batch W23"
   ]
 }"""
 
@@ -71,13 +81,20 @@ RULES:
 - ONLY extract what is explicitly present in the provided text. Do NOT infer, guess, or fabricate any information.
 - Use null for fields that cannot be determined from the data.
 - Use empty lists [] for list fields where no information is available.
-- For sector tags, use these canonical labels ONLY: AI/ML, Fintech, Healthcare, SaaS, Consumer, Climate, Enterprise Software, Edtech, Biotech, Crypto/Web3, E-commerce, Media, Real Estate, Legal Tech, HR Tech, Dev Tools, Cybersecurity, Hardware, Robotics, Food/Bev, Marketplace, Social Impact, Defense/Gov Tech
+- For sector tags, use these canonical labels ONLY: AI/ML, Fintech, Healthcare, SaaS, Consumer, Climate, Enterprise Software, Edtech, Biotech, Crypto/Web3, E-commerce, Media, Real Estate, Legal Tech, HR Tech, Dev Tools, Cybersecurity, Hardware, Robotics, Food/Bev, Marketplace, Social Impact, Defense/Gov Tech, Space/Defense Tech, HealthTech
 - For functional strengths, use these labels ONLY: Product, Engineering, Sales, Marketing, Growth, Operations, Finance, Legal, Data Science, Design, Strategy, People/HR, BD/Partnerships, Fundraising, Community, Content, Research, Supply Chain, Customer Success
 - investor_profile should be null unless the person's identity is Investor.
-- is_fundraising should be true if "Fundraising" appears in their top_of_mind survey response.
-- top_of_mind should be split from the comma-separated survey value into a list.
-- key_facts_for_fun_facts: Extract 3-5 distinctive, CONCRETE facts — not generic job descriptions. Look for: competitions won, fellowships, publications, unusual career pivots, notable achievements, specific metrics mentioned, unique hobbies or accomplishments.
+- is_fundraising should be true if the event goal mentions "Fundraising" or looking for investors/partners.
+- event_goal: Normalize from the survey answer. Use one of: Peer Connection, Fundraising, Hiring, Mentorship, Prospecting, Pipeline, Paying it Forward, Just Curious. Use null if unclear.
+- superpower: Normalize from survey. Use one of: The Zero-to-One, The Scaler, The Connector, The Operator, The Storyteller, The Architect, Other. Use null if unclear.
+- desired_connections: Normalize from survey. Use one of: The Mirror, The Collaborator, The Mentor, The Window, Investors, Engineers/Operators, Co-founder. Use null if unclear.
+- bullish_trend: Summarize their stated trend in 10 words or fewer. Use null if empty.
+- bullish_trend_tags: Extract 1-4 canonical topic tags from their trend text (e.g., AI, community, fintech, health, real estate, defense). Use [].
+- community_hopes: Summarize what they want from the community in 10 words or fewer. Use null if empty.
+- community_hopes_tags: Extract 1-4 canonical tags (e.g., mentorship, networking, collaboration, support, co-founders, investors). Use [].
+- key_facts_for_fun_facts: Extract 8-10 distinctive, CONCRETE facts — not generic job descriptions. Look for: competitions won, fellowships, publications, unusual career pivots, notable achievements, specific metrics mentioned, unique hobbies or accomplishments, notable companies worked at, schools attended, interesting projects. Try harder to find more facts from LinkedIn text.
 - For schools, set completed=true only if there is evidence they finished the program. If unclear, use completed=null.
+- role_detail: Capture any more specific role/function description if available (e.g., "Investor (Early Stage)", "Partnerships", "Engineering"). Use null if only the broad role is available.
 
 Return ONLY valid JSON, no markdown formatting, no explanation."""
 
@@ -88,16 +105,23 @@ def get_user_prompt(row, linkedin_text):
     name = row.get("name", "")
     first_name = row.get("first_name", "")
     last_name = row.get("last_name", "")
-    identity = row.get("How do you primarily identify right now?", "")
-    top_of_mind = row.get("What\u2019s top of mind for you right now?", "")
-    team_size = row.get(
-        "Founders: How many employees do you currently have? (Including founders)", ""
+    # Role from the explicit role/function column
+    identity = row.get("Which of these Role/Function apply to you (past or present!)", "")
+    # Detailed role/function from LINKEDIN PROFILE2
+    role_detail = row.get("LINKEDIN PROFILE2", "")
+    stage = row.get("If you're at a startup, describe your stage:", "")
+    sector = row.get("Industry/Sector", "")
+    event_goal = row.get("What's your primary goal for today's event?", "")
+    superpower = row.get("What is your Superpower", "")
+    desired_connections = row.get(
+        "What kind of people would be most valuable for you to meet?", ""
     )
-    hiring = row.get("Are you hiring?", "")
-    tech_needs = row.get(
-        "Do you have engineering/technical needs beyond your/your teams capacity?", ""
+    bullish_trend = row.get(
+        "What is one trend (in tech or SF) that you are genuinely bullish on?", ""
     )
-    stage = row.get("Founders: What stage is your company?", "")
+    community_hopes = row.get(
+        "We are so glad you found Circe. What are you hoping to get out of this community?", ""
+    )
 
     # Clean NaN values
     def clean(val):
@@ -109,11 +133,14 @@ def get_user_prompt(row, linkedin_text):
     first_name = clean(first_name)
     last_name = clean(last_name)
     identity = clean(identity)
-    top_of_mind = clean(top_of_mind)
-    team_size = clean(team_size)
-    hiring = clean(hiring)
-    tech_needs = clean(tech_needs)
+    role_detail = clean(role_detail)
     stage = clean(stage)
+    sector = clean(sector)
+    event_goal = clean(event_goal)
+    superpower = clean(superpower)
+    desired_connections = clean(desired_connections)
+    bullish_trend = clean(bullish_trend)
+    community_hopes = clean(community_hopes)
 
     # Truncate LinkedIn text if too long
     if linkedin_text and len(linkedin_text) > 15000:
@@ -126,11 +153,14 @@ def get_user_prompt(row, linkedin_text):
 - First Name: {first_name}
 - Last Name: {last_name}
 - Identity: {identity}
-- Top of Mind: {top_of_mind}
-- Team Size: {team_size}
-- Hiring: {hiring}
-- Technical Needs: {tech_needs}
+- Role/Function Detail: {role_detail}
 - Company Stage: {stage}
+- Industry/Sector: {sector}
+- Primary Goal for Event: {event_goal}
+- Superpower: {superpower}
+- Most Valuable Connections: {desired_connections}
+- Bullish Trend: {bullish_trend}
+- Community Hopes: {community_hopes}
 
 ## LinkedIn Profile Text
 {linkedin_text if linkedin_text else "[No LinkedIn text available — extract what you can from survey data only]"}
@@ -141,9 +171,11 @@ Return a JSON object matching this exact schema:
 
 Remember:
 - investor_profile should be null unless identity is "Investor"
-- is_fundraising = true if "Fundraising" appears in Top of Mind
-- Split top_of_mind from the comma-separated survey value into a list
-- key_facts_for_fun_facts: 3-5 distinctive CONCRETE facts, not generic job descriptions
+- is_fundraising = true if event goal mentions "Fundraising" or looking for investors
+- event_goal, superpower, desired_connections: normalize from the survey values to canonical labels
+- bullish_trend: summarize in 10 words or fewer; bullish_trend_tags: 1-4 topic tags
+- community_hopes: summarize in 10 words or fewer; community_hopes_tags: 1-4 tags
+- key_facts_for_fun_facts: 8-10 distinctive CONCRETE facts, not generic job descriptions
 - Return ONLY the JSON object, nothing else."""
 
     return prompt
@@ -162,9 +194,15 @@ def find_column(df, search_term):
 
 def load_spreadsheet(path):
     """Load and clean the guest list spreadsheet."""
-    df = pd.read_excel(path, header=1)
+    # Try header at row 0 first (new format), fall back to row 1 (old format)
+    df = pd.read_excel(path, header=0)
 
-    # Drop the empty first column (index 0)
+    # Check if the first column is 'name' or similar; if not, try header=1
+    has_name = any(str(c).strip().lower() == "name" for c in df.columns)
+    if not has_name:
+        df = pd.read_excel(path, header=1)
+
+    # Drop the empty first column (index 0) if present
     if df.columns[0] == "Unnamed: 0" or pd.isna(df.columns[0]):
         df = df.drop(df.columns[0], axis=1)
     elif str(df.columns[0]).startswith("Unnamed"):
@@ -219,13 +257,22 @@ def attach_raw_metadata(profile, row, row_index, df):
         return str(val).strip()
 
     email_col = find_column(df, "email")
-    linkedin_url_col = find_column(df, "LinkedIn profile?")
-    identity_col = find_column(df, "How do you primarily identify")
-    top_of_mind_col = find_column(df, "top of mind")
-    team_size_col = find_column(df, "How many employees")
-    hiring_col = find_column(df, "Are you hiring")
-    tech_needs_col = find_column(df, "engineering/technical needs")
-    stage_col = find_column(df, "What stage is your company")
+    # In the new guestlist, LinkedIn URL is in "Which of these best describes you right now:"
+    linkedin_url_col = find_column(df, "best describes you right now")
+    if linkedin_url_col is None:
+        linkedin_url_col = find_column(df, "LinkedIn profile?")
+    identity_col = find_column(df, "Role/Function apply")
+    if identity_col is None:
+        identity_col = find_column(df, "How do you primarily identify")
+    stage_col = find_column(df, "describe your stage")
+    if stage_col is None:
+        stage_col = find_column(df, "What stage is your company")
+    sector_col = find_column(df, "Industry/Sector")
+    event_goal_col = find_column(df, "primary goal for today")
+    superpower_col = find_column(df, "Superpower")
+    desired_conn_col = find_column(df, "most valuable for you to meet")
+    bullish_col = find_column(df, "genuinely bullish on")
+    community_col = find_column(df, "hoping to get out of this community")
 
     profile["_email"] = clean(row.get(email_col, None)) if email_col else None
     profile["_linkedin_url"] = (
@@ -235,20 +282,26 @@ def attach_raw_metadata(profile, row, row_index, df):
     profile["_identity_raw"] = (
         clean(row.get(identity_col, None)) if identity_col else None
     )
-    profile["_top_of_mind_raw"] = (
-        clean(row.get(top_of_mind_col, None)) if top_of_mind_col else None
-    )
-    profile["_team_size_raw"] = (
-        clean(row.get(team_size_col, None)) if team_size_col else None
-    )
-    profile["_hiring_raw"] = (
-        clean(row.get(hiring_col, None)) if hiring_col else None
-    )
-    profile["_tech_needs_raw"] = (
-        clean(row.get(tech_needs_col, None)) if tech_needs_col else None
-    )
     profile["_stage_raw"] = (
         clean(row.get(stage_col, None)) if stage_col else None
+    )
+    profile["_sector_raw"] = (
+        clean(row.get(sector_col, None)) if sector_col else None
+    )
+    profile["_event_goal_raw"] = (
+        clean(row.get(event_goal_col, None)) if event_goal_col else None
+    )
+    profile["_superpower_raw"] = (
+        clean(row.get(superpower_col, None)) if superpower_col else None
+    )
+    profile["_desired_connections_raw"] = (
+        clean(row.get(desired_conn_col, None)) if desired_conn_col else None
+    )
+    profile["_bullish_trend_raw"] = (
+        clean(row.get(bullish_col, None)) if bullish_col else None
+    )
+    profile["_community_hopes_raw"] = (
+        clean(row.get(community_col, None)) if community_col else None
     )
 
     return profile
@@ -282,10 +335,12 @@ def main():
     df = load_spreadsheet(args.input)
     print(f"Found {len(df)} attendees")
 
-    # Find LinkedIn text column
-    linkedin_col = find_column(df, "LinkedIn Profile paste")
+    # Find LinkedIn text column — new format uses "Linkedin Profile" for the text dump
+    linkedin_col = find_column(df, "Linkedin Profile")
     if linkedin_col is None:
-        print("WARNING: Cannot find LinkedIn Profile paste column")
+        linkedin_col = find_column(df, "LinkedIn Profile paste")
+    if linkedin_col is None:
+        print("WARNING: Cannot find LinkedIn profile text column")
         linkedin_col = None
 
     # Load existing profiles if resuming

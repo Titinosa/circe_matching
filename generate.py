@@ -9,9 +9,9 @@ Writes final_output.xlsx.
 
 Usage:
     python generate.py --profiles profiles.json --matches matches.json \
-                       --input Final_Guest_List.xlsx --output final_output.xlsx
+                       --input "New Event Guestlist.xls" --output final_output.xlsx
     python generate.py --profiles profiles.json --matches matches.json \
-                       --input Final_Guest_List.xlsx --output final_output.xlsx \
+                       --input "New Event Guestlist.xls" --output final_output.xlsx \
                        --start 5 --limit 10
 """
 
@@ -32,7 +32,7 @@ Rules:
 - Every personal detail must come from the attendee's profile data (LinkedIn text, survey fields, or extracted profile).
 - Every "ask them about" must reference a SPECIFIC fact from the match's profile (a project, company, achievement, school, etc.).
 - No vague language like "you two have so much in common" or "you'll really click."
-- Fun facts must be concrete and factual — no personality inference or emotional framing.
+- Fun facts: produce exactly 10 bullet points. They must be concrete and factual — no personality inference or emotional framing. Dig deep into LinkedIn and survey data for interesting details.
 - Return ONLY valid JSON, no markdown formatting, no explanation."""
 
 
@@ -83,24 +83,32 @@ Hi {first_name}! We are so excited you made it today. We can't wait for you to t
 [Match 4 Full Name] ([LinkedIn URL]) — You'll enjoy talking to them because [rationale]. Make sure to ask them about [specific factual hook].
 
 ### fun_facts
-3-5 bullet points about the ATTENDEE (not their matches):
+Exactly 10 bullet points about the ATTENDEE (not their matches):
 - Start each with "- "
 - Max 16 words each
 - Fact-based only, no speculation, no personality inference
-- Highlight: notable companies, competitions, fellowships, completed schools, career pivots, concrete achievements
+- Highlight: notable companies, competitions, fellowships, completed schools, career pivots, concrete achievements, unique hobbies, specific metrics, patents, publications, awards, side projects, volunteer work, languages spoken
+- Dig deep into their LinkedIn profile and survey data for interesting tidbits
 - Avoid: generic job restatement, emotional framing
+- If you cannot find 10 truly distinct facts, include specific details about their projects, industries, or career milestones
 
 Return ONLY the JSON object:
-{{"email_draft": "the full email text", "fun_facts": "- fact 1\\n- fact 2\\n- fact 3"}}"""
+{{"email_draft": "the full email text", "fun_facts": "- fact 1\\n- fact 2\\n- fact 3\\n- fact 4\\n- fact 5\\n- fact 6\\n- fact 7\\n- fact 8\\n- fact 9\\n- fact 10"}}"""
 
     return prompt
 
 
 def load_spreadsheet(path):
     """Load and clean the guest list spreadsheet."""
-    df = pd.read_excel(path, header=1)
+    # Try header at row 0 first (new format), fall back to row 1 (old format)
+    df = pd.read_excel(path, header=0)
 
-    # Drop the empty first column (index 0)
+    # Check if the first column is 'name' or similar; if not, try header=1
+    has_name = any(str(c).strip().lower() == "name" for c in df.columns)
+    if not has_name:
+        df = pd.read_excel(path, header=1)
+
+    # Drop the empty first column (index 0) if present
     if df.columns[0] == "Unnamed: 0" or pd.isna(df.columns[0]):
         df = df.drop(df.columns[0], axis=1)
     elif str(df.columns[0]).startswith("Unnamed"):
@@ -283,14 +291,8 @@ def main():
     # Build final output
     print(f"\nBuilding final output: {args.output}")
 
-    # Reload original spreadsheet (full, with header at row 1)
-    df_full = pd.read_excel(args.input, header=1)
-
-    # Drop empty first column
-    if df_full.columns[0] == "Unnamed: 0" or pd.isna(df_full.columns[0]):
-        df_full = df_full.drop(df_full.columns[0], axis=1)
-    elif str(df_full.columns[0]).startswith("Unnamed"):
-        df_full = df_full.drop(df_full.columns[0], axis=1)
+    # Reload original spreadsheet
+    df_full = load_spreadsheet(args.input)
 
     # Find name column and filter to valid rows
     name_col = None
@@ -332,7 +334,7 @@ def main():
                 worksheet.column_dimensions[
                     worksheet.cell(row=1, column=col_idx).column_letter
                 ].width = 50
-            elif col_name == "LinkedIn Profile paste":
+            elif col_name in ("LinkedIn Profile paste", "Linkedin Profile"):
                 worksheet.column_dimensions[
                     worksheet.cell(row=1, column=col_idx).column_letter
                 ].width = 30
